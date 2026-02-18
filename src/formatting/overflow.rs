@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::config::options::IndentStyle;
 use crate::toml::TokenIndices;
 use crate::toml::TokenKind;
 use crate::toml::TomlToken;
@@ -24,7 +25,12 @@ const COMMA_SPACE_WIDTH: usize = 2;
 /// Uses incremental depth tracking for O(n) complexity instead of
 /// rescanning from the start for each array.
 #[tracing::instrument]
-pub fn reflow_arrays(tokens: &mut TomlTokens<'_>, array_width: usize, tab_spaces: usize) {
+pub fn reflow_arrays(
+    tokens: &mut TomlTokens<'_>,
+    array_width: usize,
+    tab_spaces: usize,
+    indent_style: IndentStyle,
+) {
     let mut indices = TokenIndices::new();
     let mut inline_table_depth = 0usize;
     let mut nesting_depth = 0usize;
@@ -47,6 +53,7 @@ pub fn reflow_arrays(tokens: &mut TomlTokens<'_>, array_width: usize, tab_spaces
                     nesting_depth,
                     array_width,
                     tab_spaces,
+                    indent_style,
                 );
                 nesting_depth += 1;
             }
@@ -66,6 +73,7 @@ fn process_array(
     nesting_depth: usize,
     array_width: usize,
     tab_spaces: usize,
+    indent_style: IndentStyle,
 ) {
     if let Some(action) = determine_array_action(
         tokens,
@@ -81,6 +89,7 @@ fn process_array(
             tab_spaces,
             nesting_depth,
             array_width,
+            indent_style,
         );
     }
 }
@@ -182,6 +191,7 @@ fn apply_array_action(
     tab_spaces: usize,
     nesting_depth: usize,
     array_width: usize,
+    indent_style: IndentStyle,
 ) {
     match action {
         ArrayAction::Collapse { close } => {
@@ -190,13 +200,19 @@ fn apply_array_action(
         ArrayAction::CollapseWithComment { close } => {
             collapse_with_trailing_comment(tokens, open, close, nesting_depth, tab_spaces);
         }
-        ArrayAction::Expand { close } => {
-            reflow_array_to_vertical(tokens, open, close, tab_spaces, nesting_depth);
-        }
+        ArrayAction::Expand { close } => match indent_style {
+            IndentStyle::Block | IndentStyle::Visual => {
+                reflow_array_to_vertical(tokens, open, close, tab_spaces, nesting_depth);
+            }
+        },
         ArrayAction::Normalize { close } => {
             collapse_array_to_horizontal(tokens, open, close);
             let new_close = find_array_close(tokens, open).unwrap_or(open);
-            reflow_array_to_vertical(tokens, open, new_close, tab_spaces, nesting_depth);
+            match indent_style {
+                IndentStyle::Block | IndentStyle::Visual => {
+                    reflow_array_to_vertical(tokens, open, new_close, tab_spaces, nesting_depth);
+                }
+            }
         }
         ArrayAction::ReflowGrouped { close } => {
             reflow_grouped(tokens, open, close, tab_spaces, nesting_depth, array_width);
@@ -1459,6 +1475,7 @@ mod test {
     use snapbox::str;
     use snapbox::IntoData;
 
+    use crate::config::options::IndentStyle;
     use crate::toml::TomlTokens;
 
     const DEFAULT_TAB_SPACES: usize = 4;
@@ -1466,7 +1483,28 @@ mod test {
     #[track_caller]
     fn valid(input: &str, max_width: usize, expected: impl IntoData) {
         let mut tokens = TomlTokens::parse(input);
-        super::reflow_arrays(&mut tokens, max_width, DEFAULT_TAB_SPACES);
+        super::reflow_arrays(&mut tokens, max_width, DEFAULT_TAB_SPACES, IndentStyle::Block);
+        let actual = tokens.to_string();
+
+        assert_data_eq!(&actual, expected);
+
+        let (_, errors) = toml::de::DeTable::parse_recoverable(&actual);
+        if !errors.is_empty() {
+            use std::fmt::Write as _;
+            let mut result = String::new();
+            writeln!(&mut result, "---").unwrap();
+            for error in errors {
+                writeln!(&mut result, "{error}").unwrap();
+                writeln!(&mut result, "---").unwrap();
+            }
+            panic!("failed to parse\n---\n{actual}\n{result}");
+        }
+    }
+
+    #[track_caller]
+    fn valid_visual(input: &str, max_width: usize, expected: impl IntoData) {
+        let mut tokens = TomlTokens::parse(input);
+        super::reflow_arrays(&mut tokens, max_width, DEFAULT_TAB_SPACES, IndentStyle::Visual);
         let actual = tokens.to_string();
 
         assert_data_eq!(&actual, expected);
@@ -2758,6 +2796,105 @@ x = [
             20,
             str![[r#"
 x = [   ]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_expands_long_array() {
+        valid_visual(
+            r#"features = ["serde", "tokio", "reqwest"]
+"#,
+            30,
+            str![[r#"
+features = ["serde",
+            "tokio",
+            "reqwest"]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_short_array_not_expanded() {
+        valid_visual(
+            r#"features = ["a", "b"]
+"#,
+            40,
+            str![[r#"
+features = ["a", "b"]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_indent_tracks_key_width() {
+        valid_visual(
+            r#"x = ["foo", "bar", "baz"]
+"#,
+            15,
+            str![[r#"
+x = ["foo",
+     "bar",
+     "baz"]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_normalizes_mixed_layout() {
+        valid_visual(
+            r#"features = ["foo",
+    "bar", "baz"]
+"#,
+            20,
+            str![[r#"
+features = ["foo",
+            "bar",
+            "baz"]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_single_element_no_line_break() {
+        valid_visual(
+            r#"features = ["a-very-long-feature-name"]
+"#,
+            15,
+            str![[r#"
+features = ["a-very-long-feature-name"]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_empty_array_unchanged() {
+        valid_visual(
+            r#"deps = []
+"#,
+            5,
+            str![[r#"
+deps = []
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_nested_array_outer_visual() {
+        valid_visual(
+            r#"matrix = [[1, 2, 3], [4, 5, 6]]
+"#,
+            20,
+            str![[r#"
+matrix = [[1, 2, 3],
+          [4, 5, 6]]
 
 "#]],
         );

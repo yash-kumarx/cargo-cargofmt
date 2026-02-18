@@ -22,3 +22,13 @@ pub enum UseSmallHeuristics {
     /// Use `max_width` for all width settings.
     Max,
 }
+
+/// How arrays are indented when expanded to vertical layout.
+#[derive(Copy, Clone, Default, Debug, serde::Deserialize)]
+pub enum IndentStyle {
+    /// Indent elements by `tab_spaces` from the line start, with a trailing comma.
+    #[default]
+    Block,
+    /// Align elements to the column after the opening bracket, no trailing comma.
+    Visual,
+}
