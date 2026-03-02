@@ -201,17 +201,19 @@ fn apply_array_action(
             collapse_with_trailing_comment(tokens, open, close, nesting_depth, tab_spaces);
         }
         ArrayAction::Expand { close } => match indent_style {
-            IndentStyle::Block | IndentStyle::Visual => {
+            IndentStyle::Block => {
                 reflow_array_to_vertical(tokens, open, close, tab_spaces, nesting_depth);
             }
+            IndentStyle::Visual => reflow_array_to_visual(tokens, open, close, tab_spaces),
         },
         ArrayAction::Normalize { close } => {
             collapse_array_to_horizontal(tokens, open, close);
             let new_close = find_array_close(tokens, open).unwrap_or(open);
             match indent_style {
-                IndentStyle::Block | IndentStyle::Visual => {
+                IndentStyle::Block => {
                     reflow_array_to_vertical(tokens, open, new_close, tab_spaces, nesting_depth);
                 }
+                IndentStyle::Visual => reflow_array_to_visual(tokens, open, new_close, tab_spaces),
             }
         }
         ArrayAction::ReflowGrouped { close } => {
@@ -480,6 +482,41 @@ fn reflow_array_to_vertical(
 
     let insertions =
         collect_vertical_insertions(tokens, open_index, close_index, &indent, &close_indent);
+
+    apply_newline_insertions(tokens, insertions);
+    tokens.trim_empty_whitespace();
+}
+
+/// Convert a horizontal array to visual-indent layout.
+///
+/// Elements are aligned to the column after the opening bracket.
+/// No trailing comma or newline before the closing bracket.
+fn reflow_array_to_visual(
+    tokens: &mut TomlTokens<'_>,
+    open_index: usize,
+    close_index: usize,
+    tab_spaces: usize,
+) {
+    let base_width = calculate_base_width(tokens, open_index, tab_spaces);
+    let indent = " ".repeat(base_width);
+
+    clear_post_comma_whitespace(tokens, open_index, close_index);
+
+    let mut insertions: Vec<(usize, String)> = Vec::new();
+    let mut local_depth = 0i32;
+
+    for i in (open_index + 1)..close_index {
+        let kind = tokens.tokens[i].kind;
+        local_depth += depth_delta(kind);
+
+        if local_depth != 0 || kind != TokenKind::ValueSep {
+            continue;
+        }
+
+        if !is_trailing_comma(tokens, i, close_index) {
+            insertions.push((i + 1, indent.clone()));
+        }
+    }
 
     apply_newline_insertions(tokens, insertions);
     tokens.trim_empty_whitespace();
@@ -2878,7 +2915,7 @@ features = ["a-very-long-feature-name"]
         valid_visual(
             r#"deps = []
 "#,
-            5,
+            10,
             str![[r#"
 deps = []
 
