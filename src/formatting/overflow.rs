@@ -13,13 +13,17 @@ const ARRAY_BRACKETS_WIDTH: usize = 2;
 /// Display width of comma plus space: `, `.
 const COMMA_SPACE_WIDTH: usize = 2;
 
-/// Normalize array layouts based on `array_width`.
+/// Normalize array layouts based on `array_width` and element widths.
 ///
 /// - Expands horizontal arrays to vertical when they exceed `array_width`
 /// - Collapses vertical arrays to horizontal when they fit within `array_width`
 /// - Normalizes mixed-style arrays to proper vertical format
 /// - Preserves arrays containing comments (no collapse, but normalizes layout)
 /// - Comments are preserved in their relative positions during normalization
+///
+/// When a horizontal array needs to expand, `short_array_element_width_threshold`
+/// controls layout: if all elements have raw width ≤ threshold, elements are
+/// grouped multiple-per-line; otherwise each element gets its own line.
 ///
 /// Uses incremental depth tracking for O(n) complexity instead of
 /// rescanning from the start for each array.
@@ -190,10 +194,14 @@ fn determine_horizontal_array_action(
     close: usize,
     array_width: usize,
     tab_spaces: usize,
-    _short_array_element_width_threshold: usize,
+    short_array_element_width_threshold: usize,
 ) -> Option<ArrayAction> {
     if should_reflow_array(tokens, open, close, array_width, tab_spaces) {
-        Some(ArrayAction::Expand { close })
+        if all_elements_short(tokens, open, close, short_array_element_width_threshold) {
+            Some(ArrayAction::ReflowGrouped { close })
+        } else {
+            Some(ArrayAction::Expand { close })
+        }
     } else {
         None
     }
@@ -346,6 +354,21 @@ fn find_line_start(tokens: &TomlTokens<'_>, from_index: usize) -> usize {
         }
     }
     0
+}
+
+/// Check if all top-level array elements are within the width threshold.
+///
+/// Returns `true` when every element's raw token width is at or below
+/// `threshold`, enabling compact multi-element-per-line grouping.
+/// Returns `true` vacuously for empty arrays.
+fn all_elements_short(
+    tokens: &TomlTokens<'_>,
+    open_index: usize,
+    close_index: usize,
+    threshold: usize,
+) -> bool {
+    let widths = collect_element_widths(tokens, open_index, close_index);
+    widths.iter().all(|&w| w <= threshold)
 }
 
 /// Check if array elements have uniform widths.
