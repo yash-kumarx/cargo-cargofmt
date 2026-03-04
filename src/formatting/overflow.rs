@@ -24,7 +24,12 @@ const COMMA_SPACE_WIDTH: usize = 2;
 /// Uses incremental depth tracking for O(n) complexity instead of
 /// rescanning from the start for each array.
 #[tracing::instrument]
-pub fn reflow_arrays(tokens: &mut TomlTokens<'_>, array_width: usize, tab_spaces: usize) {
+pub fn reflow_arrays(
+    tokens: &mut TomlTokens<'_>,
+    array_width: usize,
+    tab_spaces: usize,
+    short_array_element_width_threshold: usize,
+) {
     let mut indices = TokenIndices::new();
     let mut inline_table_depth = 0usize;
     let mut nesting_depth = 0usize;
@@ -47,6 +52,7 @@ pub fn reflow_arrays(tokens: &mut TomlTokens<'_>, array_width: usize, tab_spaces
                     nesting_depth,
                     array_width,
                     tab_spaces,
+                    short_array_element_width_threshold,
                 );
                 nesting_depth += 1;
             }
@@ -66,6 +72,7 @@ fn process_array(
     nesting_depth: usize,
     array_width: usize,
     tab_spaces: usize,
+    short_array_element_width_threshold: usize,
 ) {
     if let Some(action) = determine_array_action(
         tokens,
@@ -73,6 +80,7 @@ fn process_array(
         inline_table_depth,
         array_width,
         tab_spaces,
+        short_array_element_width_threshold,
     ) {
         apply_array_action(
             tokens,
@@ -106,6 +114,7 @@ fn determine_array_action(
     inline_table_depth: usize,
     array_width: usize,
     tab_spaces: usize,
+    short_array_element_width_threshold: usize,
 ) -> Option<ArrayAction> {
     // Skip arrays inside inline tables
     if inline_table_depth > 0 {
@@ -115,9 +124,23 @@ fn determine_array_action(
     let close = find_array_close(tokens, open)?;
 
     if is_array_vertical(tokens, open, close) {
-        determine_vertical_array_action(tokens, open, close, array_width, tab_spaces)
+        determine_vertical_array_action(
+            tokens,
+            open,
+            close,
+            array_width,
+            tab_spaces,
+            short_array_element_width_threshold,
+        )
     } else {
-        determine_horizontal_array_action(tokens, open, close, array_width, tab_spaces)
+        determine_horizontal_array_action(
+            tokens,
+            open,
+            close,
+            array_width,
+            tab_spaces,
+            short_array_element_width_threshold,
+        )
     }
 }
 
@@ -128,6 +151,7 @@ fn determine_vertical_array_action(
     close: usize,
     array_width: usize,
     tab_spaces: usize,
+    _short_array_element_width_threshold: usize,
 ) -> Option<ArrayAction> {
     let comment_pos = comment_position(tokens, open, close);
 
@@ -166,6 +190,7 @@ fn determine_horizontal_array_action(
     close: usize,
     array_width: usize,
     tab_spaces: usize,
+    _short_array_element_width_threshold: usize,
 ) -> Option<ArrayAction> {
     if should_reflow_array(tokens, open, close, array_width, tab_spaces) {
         Some(ArrayAction::Expand { close })
@@ -1464,9 +1489,14 @@ mod test {
     const DEFAULT_TAB_SPACES: usize = 4;
 
     #[track_caller]
-    fn valid(input: &str, max_width: usize, expected: impl IntoData) {
+    fn valid_threshold(
+        input: &str,
+        max_width: usize,
+        threshold: usize,
+        expected: impl IntoData,
+    ) {
         let mut tokens = TomlTokens::parse(input);
-        super::reflow_arrays(&mut tokens, max_width, DEFAULT_TAB_SPACES);
+        super::reflow_arrays(&mut tokens, max_width, DEFAULT_TAB_SPACES, threshold);
         let actual = tokens.to_string();
 
         assert_data_eq!(&actual, expected);
@@ -1482,6 +1512,11 @@ mod test {
             }
             panic!("failed to parse\n---\n{actual}\n{result}");
         }
+    }
+
+    #[track_caller]
+    fn valid(input: &str, max_width: usize, expected: impl IntoData) {
+        valid_threshold(input, max_width, 0, expected);
     }
 
     #[test]
@@ -2758,6 +2793,109 @@ x = [
             20,
             str![[r#"
 x = [   ]
+
+"#]],
+        );
+    }
+
+    // short_array_element_width_threshold tests
+
+    #[test]
+    fn threshold_groups_short_elements() {
+        // Elements with width <= threshold are packed multiple per line.
+        // "1".."5" each have raw width 1 <= threshold 10, so they get grouped.
+        valid_threshold(
+            r#"x = [1, 2, 3, 4, 5]
+"#,
+            15,
+            10,
+            str![[r#"
+x = [
+    1, 2, 3,
+    4, 5
+]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn threshold_long_element_forces_one_per_line() {
+        // When any element exceeds the threshold the array expands one-per-line.
+        // "ab" has width 4 which is > threshold 3, so strict vertical.
+        valid_threshold(
+            r#"x = ["ab", "cd", "ef"]
+"#,
+            20,
+            3,
+            str![[r#"
+x = [
+    "ab",
+    "cd",
+    "ef",
+]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn threshold_element_width_at_boundary_is_short() {
+        // An element whose width equals the threshold counts as short.
+        // "ab" has width 4 and threshold is 4, so all elements are short -> grouped.
+        valid_threshold(
+            r#"x = ["ab", "cd", "ef"]
+"#,
+            20,
+            4,
+            str![[r#"
+x = [
+    "ab", "cd",
+    "ef"
+]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn threshold_already_vertical_unaffected() {
+        // A properly-formatted vertical array is never regrouped, regardless
+        // of threshold, because it does not go through the horizontal path.
+        valid_threshold(
+            r#"x = [
+    "a",
+    "b",
+    "c",
+]
+"#,
+            15,
+            10,
+            str![[r#"
+x = [
+    "a",
+    "b",
+    "c",
+]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn threshold_mixed_widths_all_below() {
+        // Elements with different widths can still all be below the threshold.
+        // 1(w=1), 22(w=2), 333(w=3) are all <= threshold 5, so grouped.
+        valid_threshold(
+            r#"x = [1, 22, 333]
+"#,
+            15,
+            5,
+            str![[r#"
+x = [
+    1, 22,
+    333
+]
 
 "#]],
         );

@@ -20,6 +20,7 @@ pub struct Config {
     pub max_width: usize,
     pub array_width: Option<usize>,
     pub use_small_heuristics: options::UseSmallHeuristics,
+    pub short_array_element_width_threshold: usize,
 }
 
 impl Config {
@@ -59,6 +60,7 @@ impl Default for Config {
             max_width: 100,
             array_width: None,
             use_small_heuristics: options::UseSmallHeuristics::default(),
+            short_array_element_width_threshold: 10,
         }
     }
 }
@@ -133,5 +135,14 @@ mod test {
         let config: Config =
             toml::de::from_str("max_width = 100\nuse_small_heuristics = \"Off\"").unwrap();
         assert_eq!(config.array_width(), 0); // always vertical
+    }
+
+    #[test]
+    fn short_array_element_width_threshold_default() {
+        assert_eq!(Config::default().short_array_element_width_threshold, 10);
+
+        let config: Config =
+            toml::de::from_str("short_array_element_width_threshold = 20").unwrap();
+        assert_eq!(config.short_array_element_width_threshold, 20);
     }
 }
